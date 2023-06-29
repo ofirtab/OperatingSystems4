@@ -49,17 +49,17 @@ void* smalloc(size_t size){
     }
     
     void* old_break=sbrk(size+sizeof(MallocMetadata));
-        if (old_break==(void*)(-1))
-            return NULL;
-        ++num_of_allocated_blocks;
-        num_of_allocated_bytes+=size;
-        num_of_metadata_bytes+=sizeof(MallocMetadata);
-        (*(MallocMetadata*)old_break).size = size;
-        (*(MallocMetadata*)old_break).next = NULL;
-        (*(MallocMetadata*)old_break).prev = NULL;
-        (*(MallocMetadata*)old_break).is_free = false;
-    
-        return old_break;
+    if (old_break==(void*)(-1))
+        return NULL;
+    ++num_of_allocated_blocks;
+    num_of_allocated_bytes+=size;
+    num_of_metadata_bytes+=sizeof(MallocMetadata);
+    (*(MallocMetadata*)old_break).size = size;
+    (*(MallocMetadata*)old_break).next = NULL;
+    (*(MallocMetadata*)old_break).prev = NULL;
+    (*(MallocMetadata*)old_break).is_free = false;
+
+    return (char*)old_break+sizeof(MallocMetadata);
 }
 
 void* scalloc(size_t num, size_t size) {
@@ -74,27 +74,61 @@ void* scalloc(size_t num, size_t size) {
     return addr;
 }
 
-void sfree(void* p)
-{
-    if (p==NULL||(*(MallocMetadata*)p).is_free==true)
+void sfree(void* p) {
+    if (p==NULL)
         return;
-    (*(MallocMetadata*)p).is_free=true;
+    
+    MallocMetadata* metadata=(MallocMetadata*)((char*)p-sizeof(MallocMetadata));
+    if (metadata->is_free==true)
+        return;
+    metadata->prev = NULL;
+    metadata->next = NULL;
     MallocMetadata* current = free_list;
     //empty
-    
+    num_of_free_blocks++;
+    num_of_free_bytes+=metadata->size;
     if(free_list==NULL){
-        free_list=(MallocMetadata*)p;
-        num_of_free_blocks++;
-        num_of_free_bytes+=((MallocMetadata*)p)->size;
+        free_list=metadata;
         return;
     }
-    while(free_list->next!=NULL){
-        if(free_list<p && free_list->next>p){
-            // add to list
+    if(free_list>metadata){
+        metadata->next = free_list;
+        free_list->prev = metadata;
+        free_list = metadata;
+        return;
+    }
+    while(current->next!=NULL){
+        if(current<p && current->next>p){
+            MallocMetadata* temp=current->next;
+            current->next=metadata;
+            metadata->next=temp;
+            temp->prev=metadata;
+            metadata->prev=current;
             return;
         }
+        current = current->next;
     }
-    // two edge shit-fuck one put in the beginning one in the last one
+    current->next=metadata;
+    metadata->prev=current;
+}
+
+void* srealloc(void* oldp, size_t size) {
+    if(size==0||size>MAX_SMALLOC){
+        return NULL;
+    }
+    if (oldp==NULL) {
+        return smalloc(size);
+    }
+    MallocMetadata* metadata=(MallocMetadata*)((char*)oldp-sizeof(MallocMetadata));
+    if (size <= (metadata->size))
+        return oldp;
+    void* addr=smalloc(size);
+    if(addr==NULL){
+        return NULL;
+    }
+    memmove(addr, oldp, metadata->size);
+    sfree(oldp);
+    return addr;
 }
 
 
