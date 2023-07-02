@@ -382,15 +382,20 @@ void *srealloc(void *oldp, size_t size)
     MallocMetadata *metadata = (MallocMetadata *)((char *)oldp - sizeof(MallocMetadata));
     if(metadata->cookie!=global_cookie_value)
         exit(0xdeadbeef);
-    if (size+sizeof(MallocMetadata) <= (metadata->size))
-        return oldp;
+    
     if(metadata->size<=MAX_HEAP_BLOCK_SIZE)
     {
+        if (size+sizeof(MallocMetadata) <= (metadata->size))
+            return oldp;   
         if(BuddyChan::possible_combine(metadata, size+sizeof(MallocMetadata))){
             MallocMetadata* addr=BuddyChan::merge(metadata, size+sizeof(MallocMetadata));
             memmove((char*)addr+sizeof(MallocMetadata), oldp, ((MallocMetadata*)oldp)->size-sizeof(MallocMetadata));
             return (char*)addr+sizeof(MallocMetadata);
         }
+    }
+    else{
+        if(metadata->size==size+sizeof(MallocMetadata))
+            return oldp;
     }
     void *addr = smalloc(size);
     if (addr == NULL)
@@ -399,7 +404,8 @@ void *srealloc(void *oldp, size_t size)
     }
     memmove(addr, oldp, metadata->size-sizeof(MallocMetadata));
     sfree(oldp);
-    return addr;
+    return addr;if (size+sizeof(MallocMetadata) <= (metadata->size))
+        return oldp;   
 }
 
 size_t _num_free_blocks()
