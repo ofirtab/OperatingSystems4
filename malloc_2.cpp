@@ -9,7 +9,7 @@ struct MallocMetadata{
     MallocMetadata* prev;
 };
 
-MallocMetadata* free_list;
+MallocMetadata* free_list=NULL;
 size_t num_of_free_blocks = 0;
 size_t num_of_free_bytes = 0;
 size_t num_of_allocated_blocks = 0;
@@ -31,6 +31,8 @@ void* smalloc(size_t size){
         do{
             if (current->size >= size)
             {
+                if (current==free_list)
+                    free_list=current->next;
                 if (current->next != NULL)
                     (current->next)->prev=current->prev;
                 if (current->prev != NULL)
