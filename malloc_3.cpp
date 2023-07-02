@@ -3,6 +3,8 @@
 #include <sys/mman.h>
 #include <math.h>
 #include <time.h>
+#include <stdlib.h>
+#include <stdio.h>
 
 #define MAX_ORDER 10
 #define MAX_HEAP_BLOCK_SIZE (128 * 1024)
@@ -31,6 +33,7 @@ class MetaList {
     MetaList();
     void insert(MallocMetadata* data);
     MallocMetadata* remove();
+    MallocMetadata* remove(MallocMetadata* data);
     MallocMetadata* select();
     bool is_empty() const;
 };
@@ -53,6 +56,8 @@ void MetaList::insert(MallocMetadata* metadata) {
         metadata->prev=NULL;
         return;
     }
+    if(head->cookie!=global_cookie_value)
+        exit(0xdeadbeef);
 
     if (head > metadata)
     {
@@ -88,25 +93,58 @@ void MetaList::insert(MallocMetadata* metadata) {
 MallocMetadata* MetaList::remove()
 {
     MallocMetadata* result=head;
-    if (result->cookie != global_cookie_value)
-        exit(0xdeadbeef);
     if (result!=NULL) {
+        if(result->cookie!=global_cookie_value)
+            exit(0xdeadbeef);
         head=result->next;
         result->next = NULL;
         result->prev = NULL;
+        if (head!=NULL)
+            head->prev=NULL;
     }
     return result;
+}
+
+MallocMetadata* MetaList::remove(MallocMetadata* to_delete)
+{
+    if (to_delete->cookie != global_cookie_value)
+            exit(0xdeadbeef);
+    if (head==NULL)
+        return NULL;
+    
+    if (head==to_delete)
+    {
+        head=to_delete->next;
+        to_delete->next=NULL;
+        to_delete->prev=NULL;
+        if (head!=NULL)
+            head->prev=NULL;
+        return to_delete;
+    }
+    MallocMetadata* temp=head;
+    while (temp!=to_delete){
+        if (temp->cookie != global_cookie_value)
+            exit(0xdeadbeef);
+        temp=temp->next;
+    }
+    if (to_delete->prev != NULL)
+        to_delete->prev->next = to_delete->next;
+    if (to_delete->next != NULL)
+        to_delete->next->prev=to_delete->prev;
+    return to_delete;
 }
 
 MallocMetadata* MetaList::select()
 {
     MallocMetadata* result = remove();
-    if (result->cookie != global_cookie_value)
-        exit(0xdeadbeef);
+    
     if(result!=NULL){
+        if (result->cookie != global_cookie_value)
+            exit(0xdeadbeef);
         result->is_free = false;
         --num_of_free_blocks;
-        num_of_free_bytes-=result->size;
+        num_of_free_bytes-=(result->size-sizeof(MallocMetadata));
+
     }
         
     return result;
@@ -128,6 +166,7 @@ class BuddyChan
         static void insert_chan(MallocMetadata* to_insert);
         static bool possible_combine(MallocMetadata* metadata, size_t requested_size);
         static MallocMetadata* merge(MallocMetadata* metadata, size_t requested_size);
+        static void BuddyInit();
 };
 
 BuddyChan::BuddyChan()
@@ -138,13 +177,18 @@ BuddyChan::BuddyChan()
     size_t alignment = MAX_HEAP_BLOCK_SIZE * START_BLOCK_AMOUNT;
     size_t remainder = alignment - ((size_t)current % alignment);
     void *after_alignment = sbrk(remainder);
+    if (after_alignment==(void*)(-1))
+        return;
     void *addr = sbrk(MAX_HEAP_BLOCK_SIZE * START_BLOCK_AMOUNT);
+    if (addr==(void*)(-1))
+        return;
     
     MallocMetadata *first = (MallocMetadata *)addr;
     first->size = alignment / START_BLOCK_AMOUNT;
     first->is_free = true;
+    first->cookie=global_cookie_value;
     arr[MAX_ORDER].insert(first);
-    MallocMetadata *prev = first;
+    //MallocMetadata *prev = first;
     for (int i = 1; i < START_BLOCK_AMOUNT; i++)
     {
         MallocMetadata *current = (MallocMetadata *)((char *)first + (i*128 * 1024));
@@ -157,6 +201,7 @@ BuddyChan::BuddyChan()
     num_of_free_bytes = START_BLOCK_AMOUNT * (MAX_HEAP_BLOCK_SIZE - sizeof(MallocMetadata));
     num_of_allocated_blocks = START_BLOCK_AMOUNT;
     num_of_allocated_bytes = START_BLOCK_AMOUNT * (MAX_HEAP_BLOCK_SIZE - sizeof(MallocMetadata));
+    num_of_metadata_bytes = START_BLOCK_AMOUNT * sizeof(MallocMetadata);
 }
 
 // Returns the order of the tightest block available. Returns -1 if not found.
@@ -165,13 +210,18 @@ int BuddyChan::tight(size_t size) const
     int tight=-1;
     for (int order = 0; order<=MAX_ORDER; order++)
     {
-        if (BLOCK_SIZE(order) < size)
+        if ((size_t)BLOCK_SIZE(order) < size)
             continue;
         if (arr[order].is_empty())
             continue;
         tight=order;
+        break;
     }
     return tight;
+}
+
+void BuddyChan::BuddyInit() {
+    BuddyChan::getInstance();
 }
 
 MallocMetadata *BuddyChan::use_block(size_t size)
@@ -181,7 +231,7 @@ MallocMetadata *BuddyChan::use_block(size_t size)
     int order=buddy.tight(size);
     if(order==-1) 
         return NULL;
-    while ((BLOCK_SIZE(order-1) >= size)&&(order != 0))
+    while ((order!=0) && ((size_t)(BLOCK_SIZE(order-1)) >= size))
     {
         ++num_of_free_blocks;
         ++num_of_allocated_blocks;
@@ -197,7 +247,7 @@ MallocMetadata *BuddyChan::use_block(size_t size)
         // split into two blocks, sized order/2.
         // change size of metadata, create a new empty one.
         buddy.arr[order-1].insert(metadata1);
-        MallocMetadata* metadata2=(MallocMetadata*)((char*)metadata1 + metadata1->size+sizeof(MallocMetadata));
+        MallocMetadata* metadata2=(MallocMetadata*)((char*)metadata1 + metadata1->size);
         metadata2->size=metadata1->size;
         metadata2->is_free=true;
         metadata2->cookie = global_cookie_value;
@@ -211,12 +261,14 @@ MallocMetadata *BuddyChan::use_block(size_t size)
 void BuddyChan::insert_chan(MallocMetadata* to_insert) {
     if(to_insert->cookie!=global_cookie_value)
         exit(0xdeadbeef);
+    to_insert->is_free=true;
     BuddyChan& chan = BuddyChan::getInstance();
     int order=log(to_insert->size)/log(2) - 7;
     MallocMetadata* buddy;
     num_of_free_blocks++;
     num_of_free_bytes+=to_insert->size-sizeof(MallocMetadata);
-    bool first_time = true;
+    //bool first_time = true;
+    bool inserted=false;
     if(order==MAX_ORDER){
         chan.arr[order].insert(to_insert);
         return;
@@ -231,24 +283,30 @@ void BuddyChan::insert_chan(MallocMetadata* to_insert) {
             break;
         }
         // Combine two buddies
-        if (buddy->prev!=NULL)
-            buddy->prev->next=buddy->next;
-        if(buddy->next!=NULL)
-            buddy->next->prev = buddy->prev;
+        chan.arr[order].remove(buddy);
+        if (inserted) {
+            chan.arr[order].remove(to_insert);
+        }
+
+        // if (buddy->prev!=NULL)
+        //     buddy->prev->next=buddy->next;
+        // if(buddy->next!=NULL)
+        //     buddy->next->prev = buddy->prev;
         buddy->next=NULL;
         buddy->prev=NULL;
         if (to_insert > buddy)
             to_insert=buddy;
         if(to_insert->cookie!=global_cookie_value)
             exit(0xdeadbeef);
-        if(!first_time){
-            num_of_free_bytes+=to_insert->size-sizeof(MallocMetadata);
-        }
-        first_time = false;
+        //if(!first_time){
+            num_of_free_bytes+=sizeof(MallocMetadata);
+        //}
+        //first_time = false;
         num_of_allocated_blocks--;
         num_of_allocated_bytes+=sizeof(MallocMetadata);
         (to_insert->size)*=2;
         chan.arr[order+1].insert(to_insert);
+        inserted=true;
         num_of_metadata_bytes-=sizeof(MallocMetadata);
         --num_of_free_blocks;
         ++order;
@@ -257,13 +315,13 @@ void BuddyChan::insert_chan(MallocMetadata* to_insert) {
 
 bool BuddyChan::possible_combine(MallocMetadata* metadata, size_t requested_size)
 {
-    BuddyChan& chan = BuddyChan::getInstance();
+    //BuddyChan& chan = BuddyChan::getInstance();
     int order=log(metadata->size)/log(2) - 7;
     MallocMetadata* buddy;
     if(order==MAX_ORDER){
         return false;
     }
-    int curr_size = metadata->size;
+    size_t curr_size = metadata->size;
     while (order!=MAX_ORDER) {
         buddy=(MallocMetadata*)(((size_t)metadata)^(curr_size));
         if (buddy->cookie != global_cookie_value)
@@ -294,10 +352,11 @@ MallocMetadata* BuddyChan::merge(MallocMetadata* metadata, size_t requested_size
             exit(0xdeadbeef);
         if(metadata->cookie!=global_cookie_value)
             exit(0xdeadbeef);
-        if (buddy->prev!=NULL)
-            buddy->prev->next=buddy->next;
-        if(buddy->next!=NULL)
-            buddy->next->prev = buddy->prev;
+        // if (buddy->prev!=NULL)
+        //     buddy->prev->next=buddy->next;
+        // if(buddy->next!=NULL)
+        //     buddy->next->prev = buddy->prev;
+        chan.arr[order].remove(buddy);
         buddy->next=NULL;
         buddy->prev=NULL;
         if (metadata > buddy)
@@ -322,6 +381,8 @@ void *smalloc(size_t size)
     {
         return NULL;
     }
+    BuddyChan::BuddyInit();
+
     void* ret_addr = NULL;
     if (size + sizeof(MallocMetadata) <= MAX_HEAP_BLOCK_SIZE)
     {
@@ -329,13 +390,19 @@ void *smalloc(size_t size)
     }
     else
     {
-        ret_addr = mmap(NULL, size+sizeof(MallocMetadata), PROT_READ | PROT_WRITE, MAP_ANONYMOUS, -1, 0);
+        ret_addr = mmap(NULL, size+sizeof(MallocMetadata), PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
         if(ret_addr==MAP_FAILED)
             return NULL;
         ++num_of_allocated_blocks;
         num_of_allocated_bytes+=size;
         num_of_metadata_bytes+=sizeof(MallocMetadata);
+        MallocMetadata* metadata=(MallocMetadata*)ret_addr;
+        metadata->cookie=global_cookie_value;
+        metadata->is_free=false;
+        metadata->size=size+sizeof(MallocMetadata);
     }
+    if (ret_addr==NULL)
+        return NULL;
     return (char*)ret_addr + sizeof(MallocMetadata);
 }
 
@@ -362,8 +429,10 @@ void sfree(void *p)
     if(metadata->size<=MAX_HEAP_BLOCK_SIZE)
         BuddyChan::insert_chan(metadata);
     else{
+        int temp_size=metadata->size;
+        metadata->is_free=true;
         munmap(metadata, metadata->size); // error? if so, also add perror to mmap
-        num_of_allocated_bytes-=metadata->size-sizeof(MallocMetadata);
+        num_of_allocated_bytes-=temp_size-sizeof(MallocMetadata);
         num_of_metadata_bytes-=sizeof(MallocMetadata);
         num_of_allocated_blocks--;
     }
@@ -437,3 +506,31 @@ size_t _size_meta_data()
 {
     return sizeof(MallocMetadata);
 }
+
+// void performCorruption() {
+//     // Allocate memory
+//     void* ptr1 = smalloc(16);  // Allocate 16 bytes
+//     void* ptr2 = smalloc(32);  // Allocate 32 bytes
+
+//     // Overflow the first allocation
+//     char* overflowPtr = reinterpret_cast<char*>(ptr1);
+//     for (int i = 0; i < 2000; i++) {
+//         overflowPtr[i] = 'A';
+//     }
+
+//     // Allocate more memory
+//     void* ptr3 = smalloc(64);  // Allocate 64 bytes
+
+//     // Free the allocations
+//     sfree(ptr1);
+//     sfree(ptr2);
+//     sfree(ptr3);
+
+// }
+
+// int main()
+// {
+//     //BuddyChan& buddy=BuddyChan::getInstance();
+//     performCorruption();
+//     return 0;
+// }
