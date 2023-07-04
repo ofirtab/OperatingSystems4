@@ -10,6 +10,7 @@
 #define MAX_HEAP_BLOCK_SIZE (128 * 1024)
 #define START_BLOCK_AMOUNT 32
 #define BLOCK_SIZE(order) (2<<(order))*64
+#define MAX_SMALLOC 1e8
 struct MallocMetadata
 {
     int cookie;
@@ -365,11 +366,11 @@ MallocMetadata* BuddyChan::merge(MallocMetadata* metadata, size_t requested_size
         num_of_allocated_bytes+=sizeof(MallocMetadata);
         num_of_free_bytes-=metadata->size-sizeof(MallocMetadata);
         (metadata->size)*=2;
+        num_of_metadata_bytes-=sizeof(MallocMetadata);
+        --num_of_free_blocks;
         if(metadata->size>=requested_size){
             return metadata;
         }
-        num_of_metadata_bytes-=sizeof(MallocMetadata);
-        --num_of_free_blocks;
         ++order;
     }
     return NULL;
@@ -377,11 +378,11 @@ MallocMetadata* BuddyChan::merge(MallocMetadata* metadata, size_t requested_size
 
 void *smalloc(size_t size)
 {
-    if (size == 0)
+    BuddyChan::BuddyInit();
+    if (size == 0 || size>MAX_SMALLOC)
     {
         return NULL;
     }
-    BuddyChan::BuddyInit();
 
     void* ret_addr = NULL;
     if (size + sizeof(MallocMetadata) <= MAX_HEAP_BLOCK_SIZE)
@@ -408,7 +409,7 @@ void *smalloc(size_t size)
 
 void *scalloc(size_t num, size_t size)
 {
-    if (size == 0 || num == 0)
+    if (size == 0 || num == 0 || size>MAX_SMALLOC)
         return NULL;
     void *addr = smalloc(num * size);
     if (addr == NULL)
@@ -440,7 +441,7 @@ void sfree(void *p)
 
 void *srealloc(void *oldp, size_t size)
 {
-    if (size == 0)
+    if (size == 0 || size>MAX_SMALLOC)
     {
         return NULL;
     }
